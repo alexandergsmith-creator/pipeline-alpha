@@ -1,3 +1,5 @@
 yt-dlp
 kaggle
-bgutil-ytdlp-pot-provider
+requests
+python-slugify
+yt-dlp-get-pot
