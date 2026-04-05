@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""
-Pipeline Alpha — YouTube Audio Harvest (2026 Engine)
-=======================================================
-Bypasses bot checks using Deno + get-pot plugin.
-Slices into chunks and versions them into Kaggle.
-"""
-
 import json
 import logging
 import os
@@ -21,18 +14,15 @@ from kaggle.api.kaggle_api_extended import KaggleApi
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-DATASET_ID = os.environ.get("KAGGLE_DATASET", "")
+DATASET_ID = os.environ.get("KAGGLE_DATASET", "alexandergordonsmith/youtube-jobs")
 WORKERS = int(os.environ.get("WORKERS", "1"))
 FETCH_LIMIT = int(os.environ.get("FETCH_LIMIT", "1"))
 SEGMENT_SECONDS = int(os.environ.get("SEGMENT_SECONDS", "600"))
 
 CHANNELS_FILE = Path("channels.json")
 ARCHIVE_FILE = Path("archive.txt")
-DEFAULT_CHANNELS = ["https://www.youtube.com/@MKBHD/videos"]
+DEFAULT_CHANNELS = ["https://www.youtube.com/@veritasium/videos"]
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)-8s %(message)s",
@@ -46,28 +36,24 @@ log = logging.getLogger("pipeline-alpha")
 # ---------------------------------------------------------------------------
 
 def run_cmd(cmd: list[str], check: bool = False):
-    """Executes system commands and captures output."""
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         err_msg = result.stderr.strip()
         if check:
+            log.error(f"Command Error: {err_msg}")
             raise RuntimeError(f"Command failed: {err_msg[:300]}")
-        log.warning("System Note: %s", err_msg[:200])
     return result
 
 def _download_audio(video_id: str, dest: Path) -> Path:
-    """Downloads audio using the 'get_pot' plugin to bypass bot checks."""
     out_template = str(dest / f"{video_id}.wav")
     url = f"https://www.youtube.com/watch?v={video_id}"
 
+    # Stripped: No spoofing, no fake clients. 
+    # Just the raw URL and the archive to prevent duplicates.
     cmd = [
         "yt-dlp",
         "--extract-audio",
         "--audio-format", "wav",
-        # THE "NO GAMES" ENGINE:
-        # Uses Deno (from Nixpacks) + yt-dlp-get-pot to bypass sign-in walls
-        "--plugin-name", "get_pot",
-        "--extractor-args", "youtube:player-client=web,android;player_skip=web_embedded_client",
         "--download-archive", str(ARCHIVE_FILE),
         "--output", out_template,
         "--no-playlist",
@@ -84,7 +70,6 @@ def _download_audio(video_id: str, dest: Path) -> Path:
     return wav
 
 def _slice_audio(wav: Path, chunk_dir: Path):
-    """Slices high-quality audio into training-ready segments."""
     cmd = [
         "ffmpeg", "-i", str(wav),
         "-f", "segment", "-segment_time", str(SEGMENT_SECONDS),
@@ -95,7 +80,6 @@ def _slice_audio(wav: Path, chunk_dir: Path):
     return len(list(chunk_dir.glob("*.wav")))
 
 def _upload_to_kaggle(api: KaggleApi, chunk_dir: Path, video_id: str):
-    """Versions the data into Kaggle. Handles metadata generation."""
     meta = {
         "id": DATASET_ID,
         "title": "Pipeline Alpha Harvest",
@@ -105,7 +89,6 @@ def _upload_to_kaggle(api: KaggleApi, chunk_dir: Path, video_id: str):
     
     timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     
-    # Attempt upload - this is where 401 errors usually happen
     try:
         api.dataset_create_version(
             str(chunk_dir),
@@ -115,11 +98,10 @@ def _upload_to_kaggle(api: KaggleApi, chunk_dir: Path, video_id: str):
         )
     except Exception as e:
         if "401" in str(e):
-            log.error("🔑 Kaggle 401: Key expired or Dataset ID '%s' is wrong.", DATASET_ID)
+            log.error("🔑 Kaggle 401: Unauthorized for '%s'. Check Dataset existence.", DATASET_ID)
         raise e
 
 def process_video(video_id: str, api: KaggleApi):
-    """Full pipeline for a single video."""
     log.info("▶  Processing %s", video_id)
     with tempfile.TemporaryDirectory(prefix=f"palpha_{video_id}_") as tmp:
         work = Path(tmp)
@@ -139,10 +121,6 @@ def process_video(video_id: str, api: KaggleApi):
         except Exception as e:
             log.error("❌ Failed %s: %s", video_id, str(e)[:200])
 
-# ---------------------------------------------------------------------------
-# Main Execution
-# ---------------------------------------------------------------------------
-
 def main():
     log.info("🚀 Pipeline-Alpha starting up...")
 
@@ -150,35 +128,35 @@ def main():
         log.error("CRITICAL: KAGGLE_DATASET environment variable is missing.")
         return
 
-    # Authenticate Kaggle
     try:
         api = KaggleApi()
         api.authenticate()
         log.info("🔑 Kaggle Identity Verified.")
     except Exception as e:
-        log.error("❌ Kaggle Auth Failed. Check your KAGGLE_KEY: %s", e)
+        log.error("❌ Kaggle Auth Failed: %s", e)
         return
 
-    # Load Targets
     if not CHANNELS_FILE.exists():
         CHANNELS_FILE.write_text(json.dumps(DEFAULT_CHANNELS))
     
-    channels = json.loads(CHANNELS_FILE.read_text())
+    try:
+        channels = json.loads(CHANNELS_FILE.read_text())
+    except Exception:
+        channels = DEFAULT_CHANNELS
+        
     target = random.choice(channels)
     
-    # Discovery (Find latest videos)
     log.info("🎯 Targeting: %s", target)
     cmd = ["yt-dlp", "--flat-playlist", "--get-id", "--playlist-end", str(FETCH_LIMIT), target]
     discovery = run_cmd(cmd)
     video_ids = [line.strip() for line in discovery.stdout.splitlines() if line.strip()]
 
     if not video_ids:
-        log.warning("No new videos found for %s. Check URL format.", target)
+        log.warning("No new videos found.")
         return
 
     log.info("⚙  Queue: %d video(s) | Workers: %d", len(video_ids), WORKERS)
 
-    # Multi-threaded execution
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         futures = [pool.submit(process_video, vid, api) for vid in video_ids]
         for f in as_completed(futures):
