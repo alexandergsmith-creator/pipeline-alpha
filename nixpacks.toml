@@ -1,2 +1,11 @@
 [phases.setup]
-nixPkgs = ["...", "ffmpeg", "deno"]
+nixPkgs = ["python311", "ffmpeg", "deno"]
+
+[phases.install]
+cmds = [
+    "python -m venv /app/.venv",
+    ". /app/.venv/bin/activate && pip install -r requirements.txt"
+]
+
+[start]
+cmd = ". /app/.venv/bin/activate && python main.py"
